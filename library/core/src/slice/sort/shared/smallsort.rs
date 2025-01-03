@@ -3,6 +3,13 @@
 use crate::mem::{self, ManuallyDrop, MaybeUninit};
 use crate::slice::sort::shared::FreezeMarker;
 use crate::{intrinsics, ptr, slice};
+use safety::{ensures, requires};
+
+#[allow(unused_imports)]
+use crate::ub_checks;
+
+#[cfg(kani)]
+use crate::kani;
 
 // It's important to differentiate between SMALL_SORT_THRESHOLD performance for
 // small slices and small-sort performance sorting small sub-slices as part of
@@ -539,6 +546,50 @@ where
 ///
 /// # Safety
 /// begin < tail and p must be valid and initialized for all begin <= p <= tail.
+#[requires(
+    begin.addr() < tail.addr()
+        && (0..=(tail.addr() - begin.addr()))
+            .all(|i| {
+                let p = begin.addr(i);
+                ub_checks::can_dereference(p as *const _)
+                    && ub_checks::can_write(p)
+                    && ub_checks::same_allocation(begin as *const _, p as *const _)
+            })
+        // [begin, tail) is sorted
+        && is_less.call_with(|is_less| {
+            (0..(tail.addr() - begin.addr()))
+                .map_windows(|[a, b]| !is_less(&*begin.add(b), &*begin.add(a)))
+                .all(crate::convert::identity)
+        })
+)]
+#[ensures(|_| {
+    // [begin, tail] is sorted
+    is_less.call_with(|is_less| {
+        (0..=(tail.addr() - begin.addr()))
+            .map_windows(|[a, b]| !is_less(&*begin.add(b), &*begin.add(a)))
+            .all(crate::convert::identity)
+    })
+})]
+#[cfg_attr(kani, kani::modifies(
+    // Elements in range [begin, tail], up to 17
+    begin,
+    begin.add(1 % (tail.addr().saturating_sub(begin.addr()))),
+    begin.add(2 % (tail.addr().saturating_sub(begin.addr()))),
+    begin.add(3 % (tail.addr().saturating_sub(begin.addr()))),
+    begin.add(4 % (tail.addr().saturating_sub(begin.addr()))),
+    begin.add(5 % (tail.addr().saturating_sub(begin.addr()))),
+    begin.add(6 % (tail.addr().saturating_sub(begin.addr()))),
+    begin.add(7 % (tail.addr().saturating_sub(begin.addr()))),
+    begin.add(8 % (tail.addr().saturating_sub(begin.addr()))),
+    begin.add(9 % (tail.addr().saturating_sub(begin.addr()))),
+    begin.add(10 % (tail.addr().saturating_sub(begin.addr()))),
+    begin.add(11 % (tail.addr().saturating_sub(begin.addr()))),
+    begin.add(12 % (tail.addr().saturating_sub(begin.addr()))),
+    begin.add(13 % (tail.addr().saturating_sub(begin.addr()))),
+    begin.add(14 % (tail.addr().saturating_sub(begin.addr()))),
+    begin.add(15 % (tail.addr().saturating_sub(begin.addr()))),
+    tail,
+))]
 unsafe fn insert_tail<T, F: FnMut(&T, &T) -> bool>(begin: *mut T, tail: *mut T, is_less: &mut F) {
     // SAFETY: see individual comments.
     unsafe {
@@ -577,6 +628,15 @@ unsafe fn insert_tail<T, F: FnMut(&T, &T) -> bool>(begin: *mut T, tail: *mut T, 
 }
 
 /// Sort `v` assuming `v[..offset]` is already sorted.
+#[cfg_attr(kani, kani::modifies(v)]
+#[requires(
+    offset != 0
+        && offset <= v.len()
+        && is_less.call_with(|is_less| v[..offset].is_sorted_by(|a, b| !is_less(b, a)))
+)]
+#[ensures(|_| {
+    is_less.call_with(|is_less| v.is_sorted_by(|a, b| !is_less(b, a)))
+})]
 pub fn insertion_sort_shift_left<T, F: FnMut(&T, &T) -> bool>(
     v: &mut [T],
     offset: usize,
@@ -869,4 +929,81 @@ fn panic_on_ord_violation() -> ! {
 pub(crate) const fn has_efficient_in_place_swap<T>() -> bool {
     // Heuristic that holds true on all tested 64-bit capable architectures.
     mem::size_of::<T>() <= 8 // mem::size_of::<u64>()
+}
+
+#[cfg(kani)]
+#[unstable(feature = "kani", issue = "none")]
+mod verify {
+    use super::*;
+
+    // The maximum length of the slice that `insertion_sort_shift_left`
+    // is called upon.
+    // The value is from the following line;
+    // https://github.com/model-checking/verify-rust-std/blob/1a38674ad6753e3a78e0181d1fe613f3b25ebacd/library/core/src/slice/sort/shared/smallsort.rs#L330-L335
+    const INSERTION_SORT_MAX_LEN: usize = 17;
+
+    type ComparerFnPtr<T> = fn(&T, &T) -> bool;
+
+    // Sort functions in smallsort module receives `&mut FnMut(&Self, &Self) -> bool` as the
+    // comparer, but we cannot use them inside our requires and ensures attribute as
+    // they are captured as non exclusive reference `&&mut FnMut(&Self, &Self) -> bool`.
+    // This trait allows calls inside requires and ensures attributes for function pointer types.
+    trait Callee<T> {
+        fn call_with<F: Fn(ComparerFnPtr<T>) -> bool>(&self, caller: F) -> bool;
+    }
+
+    impl<T, U> Callee<T> for U {
+        default fn call_with<F: Fn(ComparerFnPtr<T>) -> bool>(&self, caller: F) -> bool; {
+            panic!("This `is_less` cannot be called inside attributes like `requires` or `ensures`");
+        }
+    }
+
+    macro_rules! implement_callee_for_ref_mut_fn_ptr {
+        ($ty:ty) => {
+            impl Callee<$ty> for &mut ComparerFnPtr<$ty> -> bool {
+                fn call_with<F: Fn(ComparerFnPtr<T>) -> bool>(&self, caller: F) -> bool {
+                    let f: ComparerFnPtr<T> -> bool = **self;
+                    caller(f)
+                }
+            }
+        };
+    }
+
+    implement_callee_for_ref_mut_fn_ptr!(u8);
+
+    #[kani::proof_for_contract(insert_tail)]
+    #[kani::unwind(17)]
+    pub fn check_insert_tail() {
+        let mut arr = [u8; INSERTION_SORT_MAX_LEN] = kani::any();
+        let slice = kani::slice::any_slice_of_array_mut(&mut arr);
+        let begin = slice.as_mut_ptr();
+        let tail = begin.add(slice.len());
+        let mut is_less: ComparerFnPtr<u8> = |a, b| a < b;
+        unsafe {
+            insert_tail(begin, tail, &mut is_less);
+        }
+    }
+
+    #[kani::proof_for_contract(insertion_sort_shift_left)]
+    #[kani::stub_verified(insert_tail)]
+    #[kani::unwind(17)]
+    pub fn check_insertion_sort_shift_left() {
+        // Make `slice[..offset]` sorted.
+        // This is faster than abortion path in `required` attribute
+        // on `insertion_sort_shift_left`
+        let mut arr = [0_u8; INSERTION_SORT_MAX_LEN];
+        let slice = kani::slice::any_slice_of_array_mut(&mut arr);
+        let offset = kani::any_where(|&v| v != 0 && v <= slice.len());
+        let mut acc = 0;
+        for i in 0..INSERTION_SORT_MAX_LEN {
+            if i < offset {
+                acc = acc.saturating_add(kani::any());
+                slice[i] = acc;
+            } else {
+                slice[i] = kani::any();
+            }
+        }
+        let mut is_less: ComparerFnPtr<u8> = |a, b| a < b;
+        insertion_sort_shift_left(slice, offset, &mut is_less);
+    }
 }
