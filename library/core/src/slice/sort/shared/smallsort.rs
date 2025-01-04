@@ -11,6 +11,9 @@ use crate::ub_checks;
 #[cfg(kani)]
 use crate::kani;
 
+#[cfg(kani)]
+use verify::Callee;
+
 // It's important to differentiate between SMALL_SORT_THRESHOLD performance for
 // small slices and small-sort performance sorting small sub-slices as part of
 // the main quicksort loop. For the former, testing showed that the
@@ -656,6 +659,14 @@ pub fn insertion_sort_shift_left<T, F: FnMut(&T, &T) -> bool>(
         let v_base = v.as_mut_ptr();
         let v_end = v_base.add(len);
         let mut tail = v_base.add(offset);
+        #[kani::loop_invariant(
+            tail.addr() >= v_base.addr() + offset
+                && tail.addr() <= v_end.addr()
+                && is_less.call_with(|is_less| {
+                    v[..(tail.addr() - v_base.addr())]
+                        .is_sorted_by(|a, b| !is_less(b, a))
+                })
+        )]
         while tail != v_end {
             // SAFETY: v_base and tail are both valid pointers to elements, and
             // v_base < tail since we checked offset != 0.
@@ -944,17 +955,18 @@ mod verify {
 
     type ComparerFnPtr<T> = fn(&T, &T) -> bool;
 
-    // Sort functions in smallsort module receives `&mut FnMut(&Self, &Self) -> bool` as the
-    // comparer, but we cannot use them inside our requires and ensures attribute as
-    // they are captured as non exclusive reference `&&mut FnMut(&Self, &Self) -> bool`.
-    // This trait allows calls inside requires and ensures attributes for function pointer types.
-    trait Callee<T> {
+    // Sort functions in smallsort module receives `&mut FnMut(&Self, &Self) -> bool`
+    // as the comparer, but we cannot use them inside kani attribute as they are
+    // captured as non exclusive reference `&&mut FnMut(&Self, &Self) -> bool`.
+    // This trait allows calls inside requires and ensures attributes for function
+    // pointer types.
+    pub trait Callee<T> {
         fn call_with<F: Fn(ComparerFnPtr<T>) -> bool>(&self, caller: F) -> bool;
     }
 
     impl<T, U> Callee<T> for U {
         default fn call_with<F: Fn(ComparerFnPtr<T>) -> bool>(&self, caller: F) -> bool; {
-            panic!("This `is_less` cannot be called inside attributes like `requires` or `ensures`");
+            panic!("This `is_less` cannot be called inside contract attributes");
         }
     }
 
@@ -986,7 +998,6 @@ mod verify {
 
     #[kani::proof_for_contract(insertion_sort_shift_left)]
     #[kani::stub_verified(insert_tail)]
-    #[kani::unwind(17)]
     pub fn check_insertion_sort_shift_left() {
         // Make `slice[..offset]` sorted.
         // This is faster than abortion path in `required` attribute
