@@ -1126,7 +1126,6 @@ mod verify {
 
     #[kani::proof]
     #[kani::unwind(32)]
-    #[kani::solver(kissat)]
     pub fn check_bidirectional_merge() {
         let half_and_half: HalfAndHalfSortedSlice<u8, SMALL_SORT_GENERAL_THRESHOLD> = kani::any();
         let slice = half_and_half.as_slice();
