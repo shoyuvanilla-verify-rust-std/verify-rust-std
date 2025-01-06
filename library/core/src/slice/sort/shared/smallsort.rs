@@ -549,50 +549,6 @@ where
 ///
 /// # Safety
 /// begin < tail and p must be valid and initialized for all begin <= p <= tail.
-#[requires(
-    begin.addr() < tail.addr()
-        && (0..=(tail.addr() - begin.addr()))
-            .all(|i| {
-                let p = begin.addr(i);
-                ub_checks::can_dereference(p as *const _)
-                    && ub_checks::can_write(p)
-                    && ub_checks::same_allocation(begin as *const _, p as *const _)
-            })
-        // [begin, tail) is sorted
-        && is_less.call_with(|is_less| {
-            (0..(tail.addr() - begin.addr()))
-                .map_windows(|[a, b]| !is_less(&*begin.add(b), &*begin.add(a)))
-                .all(crate::convert::identity)
-        })
-)]
-#[ensures(|_| {
-    // [begin, tail] is sorted
-    is_less.call_with(|is_less| {
-        (0..=(tail.addr() - begin.addr()))
-            .map_windows(|[a, b]| !is_less(&*begin.add(b), &*begin.add(a)))
-            .all(crate::convert::identity)
-    })
-})]
-#[cfg_attr(kani, kani::modifies(
-    // Elements in range [begin, tail], up to 17
-    begin,
-    begin.add(1 % (tail.addr().saturating_sub(begin.addr()))),
-    begin.add(2 % (tail.addr().saturating_sub(begin.addr()))),
-    begin.add(3 % (tail.addr().saturating_sub(begin.addr()))),
-    begin.add(4 % (tail.addr().saturating_sub(begin.addr()))),
-    begin.add(5 % (tail.addr().saturating_sub(begin.addr()))),
-    begin.add(6 % (tail.addr().saturating_sub(begin.addr()))),
-    begin.add(7 % (tail.addr().saturating_sub(begin.addr()))),
-    begin.add(8 % (tail.addr().saturating_sub(begin.addr()))),
-    begin.add(9 % (tail.addr().saturating_sub(begin.addr()))),
-    begin.add(10 % (tail.addr().saturating_sub(begin.addr()))),
-    begin.add(11 % (tail.addr().saturating_sub(begin.addr()))),
-    begin.add(12 % (tail.addr().saturating_sub(begin.addr()))),
-    begin.add(13 % (tail.addr().saturating_sub(begin.addr()))),
-    begin.add(14 % (tail.addr().saturating_sub(begin.addr()))),
-    begin.add(15 % (tail.addr().saturating_sub(begin.addr()))),
-    tail,
-))]
 unsafe fn insert_tail<T, F: FnMut(&T, &T) -> bool>(begin: *mut T, tail: *mut T, is_less: &mut F) {
     // SAFETY: see individual comments.
     unsafe {
@@ -631,15 +587,6 @@ unsafe fn insert_tail<T, F: FnMut(&T, &T) -> bool>(begin: *mut T, tail: *mut T, 
 }
 
 /// Sort `v` assuming `v[..offset]` is already sorted.
-#[cfg_attr(kani, kani::modifies(v)]
-#[requires(
-    offset != 0
-        && offset <= v.len()
-        && is_less.call_with(|is_less| v[..offset].is_sorted_by(|a, b| !is_less(b, a)))
-)]
-#[ensures(|_| {
-    is_less.call_with(|is_less| v.is_sorted_by(|a, b| !is_less(b, a)))
-})]
 pub fn insertion_sort_shift_left<T, F: FnMut(&T, &T) -> bool>(
     v: &mut [T],
     offset: usize,
@@ -659,14 +606,6 @@ pub fn insertion_sort_shift_left<T, F: FnMut(&T, &T) -> bool>(
         let v_base = v.as_mut_ptr();
         let v_end = v_base.add(len);
         let mut tail = v_base.add(offset);
-        #[kani::loop_invariant(
-            tail.addr() >= v_base.addr() + offset
-                && tail.addr() <= v_end.addr()
-                && is_less.call_with(|is_less| {
-                    v[..(tail.addr() - v_base.addr())]
-                        .is_sorted_by(|a, b| !is_less(b, a))
-                })
-        )]
         while tail != v_end {
             // SAFETY: v_base and tail are both valid pointers to elements, and
             // v_base < tail since we checked offset != 0.
@@ -965,16 +904,16 @@ mod verify {
     }
 
     impl<T, U> Callee<T> for U {
-        default fn call_with<F: Fn(ComparerFnPtr<T>) -> bool>(&self, caller: F) -> bool; {
+        default fn call_with<F: Fn(ComparerFnPtr<T>) -> bool>(&self, caller: F) -> bool {
             panic!("This `is_less` cannot be called inside contract attributes");
         }
     }
 
     macro_rules! implement_callee_for_ref_mut_fn_ptr {
         ($ty:ty) => {
-            impl Callee<$ty> for &mut ComparerFnPtr<$ty> -> bool {
-                fn call_with<F: Fn(ComparerFnPtr<T>) -> bool>(&self, caller: F) -> bool {
-                    let f: ComparerFnPtr<T> -> bool = **self;
+            impl Callee<$ty> for &mut ComparerFnPtr<$ty> {
+                fn call_with<F: Fn(ComparerFnPtr<$ty>) -> bool>(&self, caller: F) -> bool {
+                    let f: ComparerFnPtr<$ty> = **self;
                     caller(f)
                 }
             }
@@ -983,38 +922,123 @@ mod verify {
 
     implement_callee_for_ref_mut_fn_ptr!(u8);
 
-    #[kani::proof_for_contract(insert_tail)]
-    #[kani::unwind(17)]
-    pub fn check_insert_tail() {
-        let mut arr = [u8; INSERTION_SORT_MAX_LEN] = kani::any();
-        let slice = kani::slice::any_slice_of_array_mut(&mut arr);
-        let begin = slice.as_mut_ptr();
-        let tail = begin.add(slice.len());
-        let mut is_less: ComparerFnPtr<u8> = |a, b| a < b;
-        unsafe {
-            insert_tail(begin, tail, &mut is_less);
+    trait SaturatingAdd: Copy + Default {
+        fn saturating_add(self, rhs: Self) -> Self;
+    }
+
+    impl SaturatingAdd for u8 {
+        #[inline(always)]
+        fn saturating_add(self, rhs: Self) -> Self {
+            u8::saturating_add(self, rhs)
         }
     }
 
-    #[kani::proof_for_contract(insertion_sort_shift_left)]
-    #[kani::stub_verified(insert_tail)]
-    pub fn check_insertion_sort_shift_left() {
-        // Make `slice[..offset]` sorted.
-        // This is faster than abortion path in `required` attribute
-        // on `insertion_sort_shift_left`
-        let mut arr = [0_u8; INSERTION_SORT_MAX_LEN];
-        let slice = kani::slice::any_slice_of_array_mut(&mut arr);
-        let offset = kani::any_where(|&v| v != 0 && v <= slice.len());
-        let mut acc = 0;
-        for i in 0..INSERTION_SORT_MAX_LEN {
-            if i < offset {
+    struct SortedArray<T, const N: usize>([T; N]);
+
+    impl<T: kani::Arbitrary + SaturatingAdd, const N: usize> kani::Arbitrary for SortedArray<T, N> {
+        fn any() -> Self {
+            let mut array = [Default::default(); N];
+            let mut acc: T = Default::default();
+            for i in 0..N {
                 acc = acc.saturating_add(kani::any());
-                slice[i] = acc;
-            } else {
-                slice[i] = kani::any();
+                array[i] = acc;
+            }
+            Self(array)
+        }
+    }
+
+    struct SortedSlice<T, const N: usize> {
+        array: [T; N],
+        slice_len: usize,
+        sorted_len: usize,
+    }
+
+    impl SortedSlice<T, const N: usize> {
+        fn as_slice(&self) -> &[T] {
+            &self.array[..self.slice_len]
+        }
+
+        fn as_slice_mut(&self) -> &mut [T] {
+            &mut self.array[..self.slice_len]
+        }
+    }
+
+    impl<T: kani::Arbitrary + SaturatingAdd, const N: usize> kani::Arbitrary for SortedSlice<T, N> {
+        fn any() -> Self {
+            let mut array = [Default::default(); N];
+            let slice_len = kani::any_where(|&v| v <= N);
+            let sorted_len = kani::any_where(|&v| v <= slice_len);
+            let mut acc: T = Default::default();
+            for i in 0..N {
+                if i < sorted_len {
+                    acc = acc.saturating_add(kani::any());
+                    array[i] = acc;
+                } else if i >= sorted_len && i < slice_len {
+                    array[i] = kani::any();
+                }
+            }
+            Self {
+                array,
+                slice_len,
+                sorted_len,
             }
         }
+    }
+
+    #[kani::proof]
+    #[kani::unwind(18)]
+    pub fn check_insert_tail() {
+        let mut sorted_slice: SortedSlice<u8, INSERTION_SORT_MAX_LEN> = kani::any();
+        let slice = sorted_slice.as_slice_mut();
+        kani::assume(sorted_slice.sorted_len > 0 && sorted_slice.sorted_len < slice.len())
         let mut is_less: ComparerFnPtr<u8> = |a, b| a < b;
-        insertion_sort_shift_left(slice, offset, &mut is_less);
+        unsafe {
+            let begin = slice.as_mut_ptr();
+            let tail = begin.add(slice.len());
+            insert_tail(begin, tail, &mut is_less);
+        }
+        kani::assert(
+            slice[..=sorted_slice.sorted_len)]
+                .is_sorted_by(|a, b| !is_less(b, a)),
+            "slice[..tail] is not sorted",
+        );
+    }
+
+    unsafe fn insert_tail_stub_u8<T, F: FnMut(&T, &T) -> bool>(
+        begin: *mut T,
+        tail: *mut T,
+        is_less: &mut F,
+    ) {
+        kani::assert(
+            begin.addr() < tail.addr(),
+            "required condition: `begin.addr() < tail.addr()` - failed",
+        );
+
+        // It's sufficient to check for two arbitrary indexes to ensure sortedness
+        let b = kani::any_where(|&v| < tail.addr() - begin.addr());
+        let a = kani::any_where(|&v| v <= b);
+        kani::assert(
+            is_less.call_with(|is_less| !is_less(&*begin.add(b), &*begin.add(a))),
+            "required condition: `[begin, tail)` must be sorted - failed",
+        );
+
+        // Instead of actually sorting, replace the range with arbitrary sorted slice
+        let SortedArray::<u8; INSERTION_SORT_MAX_LEN>(array) = kani::any();
+        ptr::copy_nonoverlapping(array.as_ptr(), begin as _, tail.addr() - begin.addr() + 1);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(18)]
+    #[kani::stub(insert_tail, insert_tail_stub_u8)]
+    pub fn check_insertion_sort_shift_left() {
+        let mut sorted_slice: SortedSlice<u8, INSERTION_SORT_MAX_LEN> = kani::any();
+        kani::assume(sorted_slice.sorted_len > 0);
+        let slice = sorted_slice.as_slice_mut();
+        let mut is_less: ComparerFnPtr<u8> = |a, b| a < b;
+        insertion_sort_shift_left(slice, sorted_slice.sorted_len, &mut is_less);
+        kani::assert(
+            slice.is_sorted_by(|a, b| !is_less(b, a)),
+            "slice is not sorted",
+        );
     }
 }
