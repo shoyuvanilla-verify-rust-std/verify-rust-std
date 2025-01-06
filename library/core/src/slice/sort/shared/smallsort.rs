@@ -981,24 +981,20 @@ mod verify {
         }
     }
 
-    impl<T, const N: usize> SortedSlice<T, N> {
-        fn as_mut_slice(&mut self) -> &mut [T] {
-            &mut self.array[..self.slice_len]
-        }
-    }
-
     struct HalfAndHalfSortedSlice<T, const N: usize> {
         array: [T; N],
         slice_len: usize,
     }
 
-    impl <T, const N: usize> HalfAndHalfSortedSlice<T, const N: usize> {
+    impl <T, const N: usize> HalfAndHalfSortedSlice<T, N> {
         fn as_slice(&self) -> &[T] {
-            &mut self.array[..self.slice_len]
+            &self.array[..self.slice_len]
         }
     }
 
-    impl<T: kani::Arbitrary + SaturatingAdd, const N: usize> kani::Arbitrary for HalfAndHalfSortedSlice<T, N> {
+    impl<T: kani::Arbitrary + SaturatingAdd, const N: usize> kani::Arbitrary
+        for HalfAndHalfSortedSlice<T, N>
+    {
         fn any() -> Self {
             let mut array = [Default::default(); N];
             let slice_len = kani::any_where(|&v| v <= N);
@@ -1006,16 +1002,13 @@ mod verify {
             for i in 0..N {
                 if i < slice_len {
                     if i == slice_len / 2 {
-                        acc = 0;
+                        acc = Default::default();
                     }
                     acc = acc.saturating_add(kani::any());
                     array[i] = acc;
                 }
             }
-            Self {
-                array,
-                slice_len,
-            }
+            Self { array, slice_len }
         }
     }
 
@@ -1033,8 +1026,7 @@ mod verify {
             insert_tail(begin, tail, &mut is_less);
         }
         kani::assert(
-            slice[..=sorted_len]
-                .is_sorted_by(|a, b| !is_less(b, a)),
+            slice[..=sorted_len].is_sorted_by(|a, b| !is_less(b, a)),
             "the range `[begin, tail]` is not sorted",
         );
     }
@@ -1089,16 +1081,18 @@ mod verify {
         }
 
         // It's sufficient to check for two arbitrary indexes to ensure sortedness
-        let b = kani::any_where(|&v| v < offset);
-        let a = kani::any_where(|&v| v <= b);
+        let b: usize = kani::any_where(|&v| v < offset);
+        let a: usize = kani::any_where(|&v| v <= b);
         kani::assert(
-            is_less.call_with(|is_less| !is_less(&*begin.add(b), &*begin.add(a))),
+            is_less.call_with(|is_less| !is_less(&v[b], &v[a])),
             "required condition: `v[..offset]` must be sorted - failed",
         );
 
         // Instead of actually sorting, replace the range with arbitrary sorted slice
         let SortedArray::<u8, INSERTION_SORT_MAX_LEN>(array) = kani::any();
-        ptr::copy_nonoverlapping(array.as_ptr(), len);
+        unsafe {
+            ptr::copy_nonoverlapping(array.as_ptr(), v.as_mut_ptr() as _, len);
+        }
     }
 
     #[kani::proof]
@@ -1129,12 +1123,12 @@ mod verify {
     }
 
     #[kani::proof]
-    #[kani::unwind(16)]
+    #[kani::unwind(17)]
     pub fn check_bidirectional_merge() {
         let half_and_half: HalfAndHalfSortedSlice<u8, SMALL_SORT_GENERAL_THRESHOLD> = kani::any();
         let slice = half_and_half.as_slice();
         kani::assume(slice.len() >= 2);
-        let mut dst = MaybeUninit::<[0_u8; SMALL_SORT_GENERAL_THRESHOLD]>::uninit();
+        let mut dst = MaybeUninit::<[0; SMALL_SORT_GENERAL_THRESHOLD]>::uninit();
         let mut is_less: ComparerFnPtr<u8> = |a, b| a < b;
         let dst = unsafe {
             bidirectional_merge(slice, dst.as_mut_ptr() as *mut _, &mut is_less);
