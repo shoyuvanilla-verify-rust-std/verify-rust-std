@@ -998,15 +998,17 @@ mod verify {
         fn any() -> Self {
             let mut array = [Default::default(); N];
             let slice_len = kani::any_where(|&v| v <= N);
-            let mut acc: T = Default::default();
-            for i in 0..N {
-                if i < slice_len {
-                    if i == slice_len / 2 {
-                        acc = Default::default();
-                    }
-                    acc = acc.saturating_add(kani::any());
-                    array[i] = acc;
-                }
+            let len_div_2 = slice_len / 2;
+            let mut acc1: T = Default::default();
+            let mut acc2: T = Default::default();
+            for i in 0..len_div_2 {
+                acc1 = acc1.saturating_add(kani::any());
+                array[i] = acc1;
+                acc2 = acc2.saturating_add(kani::any());
+                array[i + len_div_2] = acc2;
+            }
+            if slice_len % 2 != 0 {
+                array[slice_len - 1] = acc2.saturating_add(kani::any());
             }
             Self { array, slice_len }
         }
@@ -1123,19 +1125,20 @@ mod verify {
     }
 
     #[kani::proof]
-    #[kani::unwind(17)]
+    #[kani::unwind(32)]
+    #[kani::solver(kissat)]
     pub fn check_bidirectional_merge() {
         let half_and_half: HalfAndHalfSortedSlice<u8, SMALL_SORT_GENERAL_THRESHOLD> = kani::any();
         let slice = half_and_half.as_slice();
         kani::assume(slice.len() >= 2);
-        let mut dst = MaybeUninit::<[0; SMALL_SORT_GENERAL_THRESHOLD]>::uninit();
+        let mut dst = MaybeUninit::<[u8; SMALL_SORT_GENERAL_THRESHOLD]>::uninit();
         let mut is_less: ComparerFnPtr<u8> = |a, b| a < b;
         let dst = unsafe {
             bidirectional_merge(slice, dst.as_mut_ptr() as *mut _, &mut is_less);
             dst.assume_init()
         };
         kani::assert(
-            dst.is_sorted_by(|a, b| !is_less(b, a)),
+            dst[..slice.len()].is_sorted_by(|a, b| !is_less(b, a)),
             "`dst` is not sorted",
         );
     }
